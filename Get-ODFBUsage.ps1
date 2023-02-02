@@ -1,21 +1,9 @@
 # credits to:
 # Joel Phillips 
 # Mac Edwards
-
-
-param (
-    $UserName = $null,
-    $Password = $null,
-    $UploadUrl = 'https://myunt.sharepoint.com/sites/ECS',
-    $UploadFolder = 'SecureReports',
-    $OutputFile = 'AlumniAudit.xlsx'
-)
-
-
-
-$SPOAdminUrl = 'https://myunt-admin.sharepoint.com'
+$SPOAdminUrl = '<TenantURL>-admin.sharepoint.com'
 Import-Module -Name ActiveDirectory,ImportExcel,PnP.PowerShell
-$Credential = New-Object -TypeName PSCredential -ArgumentList $UserName,(ConvertTo-SecureString -String $Password -AsPlainText -Force)
+
 Try {
     Connect-PnPOnline -Url $SPOAdminUrl -Credential $Credential
 } Catch {
@@ -26,40 +14,6 @@ Try {
 
 }
 
-#Get users to downgrade
-$ADFilter = @(
-    
-    'eduPersonAffiliation -eq "alum" -and',
-    'eduPersonAffiliation -ne "applicant" -and',
-    'eduPersonAffiliation -ne "student" -and',
-    'msExchExtensionCustomAttribute5 -eq "MSOL" -and '
-    'memberof -like "CN=GBL_Alumni_Downgrade,OU=Student Licensing,OU=O365_Licensing,OU=Services,DC=ad,DC=unt,DC=edu"'
-    
-) -join ' '
-
-$ADProperties = @(
-    'UserPrincipalName',
-    'EmployeeID',
-    'DisplayName',
-    'eduPersonAffiliation',
-    'Enabled',
-    'MemberOf',
-    'Surname',
-    'Givenname'
-)
-
-$OutputProperties = @(
-    'UserPrincipalName',
-    'EmployeeID',
-    'DisplayName',
-    @{Label='eduPersonAffiliation';Expression={$_.'eduPersonAffiliation' -join ','}},
-    'Enabled',
-    'OneDriveURL',
-    'OneDriveUsageMB',
-    'MemberOf',
-    'Surname',
-    'Givenname'
-)
 
 function array2hash ($array, [string]$keyName) {  
     $hash = @{}  
@@ -77,60 +31,66 @@ function array2hash ($array, [string]$keyName) {
      return $hash
 }
 
-Write-Host "Getting on-prem AD alumni user objects"
+$OutputProperties = @(
+    'UserPrincipalName',
+    'DisplayName',
+    'BlockCredential',
+    'Department'
+    'OneDriveURL',
+    'OneDriveUsageMB',
+    'Surname',
+    'Givenname',
+    'Title',
+    'WhenCreated'
+    @{label = 'Licenses';Expression={$_.Licenses.accountskuid -join ','}},
+    'Office',
+    'ResourceQuota',
+    'ResourceQuotaWarningLevel',
+    'ResourceUsageCurrent',
+    'StorageUsage',
+    'StorageMaximumLevel',
+    'StorageWarningLevel',
+    'StorageQuotaWarningLevel',
+    'StorageQuota'
 
-$AlumniAccounts = Get-ADUser -Properties $ADProperties -Server students.ad.unt.edu -Filter $ADFilter | Select-Object -Property $OutputProperties
-Write-host "Alumni accounts to process $(($alumniaccounts | measure-object).count)"
+
+)
+
+Write-host "Getting MSOL User data"
+$msolusers = get-msoluser -All | where-Object {($_.licenses).AccountSkuId -match "swmail:SPE_F1"}
 
 Write-Host "Getting all OneDrive objects"
-$AllOneDrives = array2hash (Get-PnPTenantSite -IncludeOneDriveSites -Detailed -Filter "Url -like '-my.sharepoint.com/personal/'" | Select-Object -Property Owner,Url,StorageUsageCurrent) 'Owner'
+$AllOneDrives = array2hash (Get-PnPTenantSite -IncludeOneDriveSites -Detailed -Filter "Url -like '-my.sharepoint.com/personal/'" ) 'Owner'
+
 Write-Host "Associating OneDrive data"
-$AlumniAccounts | ForEach-Object {
+
+$msoluser_prop = $msolusers | Select-Object -Property $OutputProperties
+$msoluser_prop| ForEach-Object {
     if ($AllOneDrives.($_.UserPrincipalName)) {
         $_.OneDriveURL = $AllOneDrives.($_.UserPrincipalName).Url
         $_.OneDriveUsageMB = $AllOneDrives.($_.UserPrincipalName).StorageUsageCurrent
+        $_.ResourceQuota = $AllOneDrives.($_.UserPrincipalName).ResourceQuota
+        $_.ResourceUsageCurrent = $AllOneDrives.($_.UserPrincipalName).ResourceUsageCurrent
+        $_.StorageUsage = $AllOneDrives.($_.UserPrincipalName).StorageUsage
+        $_.StorageMaximumLevel = $AllOneDrives.($_.UserPrincipalName).StorageMaximumLevel
+        $_.StorageWarningLevel = $AllOneDrives.($_.UserPrincipalName).StorageWarningLevel
+        $_.StorageQuota = $AllOneDrives.($_.UserPrincipalName).StorageQuota
+        $_.StorageQuotaWarningLevel = $AllOneDrives.($_.UserPrincipalName).StorageQuotaWarningLevel
+
+
+        #write-host "x $(($_.UserPrincipalName)) $($AllOneDrives.($_.UserPrincipalName).StorageMaximumLevel)" -ForegroundColor Green
     }
     else {
         $_.OneDriveURL = $null
         $_.OneDriveUsageMB = $null
     }
 }
+$msoluser_sort= $msoluser_prop | Sort-Object onedriveusagemb -Descending
 
-$AlumniAccounts = $AlumniAccounts | Sort-Object onedriveusagemb 
+$filename = read-host "Enter file name"
 
-foreach($account in $alumniaccounts){
+$msoluser_sort | export-csv -Path .\$filename -NoTypeInformation
 
-    $lastname = $account.Surname -replace "'","\"
-    $firstname = $account.Givenname -replace "'","\"
-    $displayname = $account.DIsplayname -replace "'","\"
-    
-    Write-host "Adding $($account.UserPrincipalName) to DB"
-    $fields = [ordered]@{
-
-        userprincipalname      = "'" + $account.userprincipalname + "'"
-        revokeaccessdate       = "'" + $(get-date ((get-date).adddays(45)) -format MM/dd/yyyy) + "'"
-        firstnotificationsent  = "'" + $null + "'"
-        secondnotificationsent = "'" + $null + "'"
-        finalnotificationsent  = "'" + $null + "'"
-        exclude                = "'" + $null + "'"
-        licensedowngraded      = "'" + $Null + "'"
-        licensedowngradedate   = "'" + $null + "'"
-        SPOsizeMB              = "'" + $account.OneDriveUsageMB + "'"
-        notes                  = "'" + $null +"'"
-        Firstname              = "'" + $FirstName           + "'"
-        Lastname               = "'" + $LastName            + "'"
-        OneDriveURL            = "'" + $account.OneDriveURL          + "'"
-        EmployeeID             = "'" + $account.EmployeeID                 + "'"
-        edupersonaffilation    = "'" + $account.eduPersonAffiliation  + "'"
-        DisplayName            = "'" + $displayname          + "'"
-
-}
-
-    $DBFields = $fields.Keys -join ","
-    $DBValues = $fields.Values -join ","
-    
-    Invoke-Sqlcmd -Query "IF NOT EXISTS (Select * FROM alumndowngrade WHERE EMPLOYEEID = $($fields.EMPLOYEEID)) BEGIN INSERT INTO alumndowngrade ($DBFields) VALUES ($DBValues) END"  -ServerInstance "MOS-Legion" -Database "AlumLicenseDowngrade"
-}
-
+Invoke-Item .\$filename
 Disconnect-PnPOnline
 Write-host "Goodbye"
